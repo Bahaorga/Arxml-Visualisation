@@ -5,13 +5,13 @@ from lxml import etree
 from io import BytesIO
 import logging
 
-# Logging configuration
+# Configuration de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# CORS configuration
+# Configuration CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,19 +20,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# AUTOSAR namespace
+# Namespace AUTOSAR
 AUTOSAR_NS = {"ns": "http://autosar.org/schema/r4.0"}
 
 
 def get_swc_type_name(swc_type_ref):
-    """Extracts the SWC type name from the reference"""
+    """Extrait le nom du type SWC depuis la référence"""
     if swc_type_ref is None:
         return "UNKNOWN"
     return swc_type_ref.text.split('/')[-1]
 
 
 def extract_swcs(root):
-    """Extracts SWC components from the composition"""
+    """Extrait les SWCs avec leurs métadonnées"""
     swcs = {}
     composition = root.find(".//ns:COMPOSITION-SW-COMPONENT-TYPE", AUTOSAR_NS)
     if composition is None:
@@ -46,63 +46,16 @@ def extract_swcs(root):
             swcs[swc_name.text] = {
                 "name": swc_name.text,
                 "type": get_swc_type_name(swc_type_ref),
-                "ports": [],
+                "ports": {},
                 "connectors": [],
                 "delegations": []
             }
     return swcs
 
 
-def extract_ports_from_connectors(root, swcs):
-    """Extracts ports from SWCs based on connectors"""
+def extract_connections(root, swcs):
+    """Extrait les connexions entre les SWCs"""
     for connector in root.findall(".//ns:CONNECTORS/ns:ASSEMBLY-SW-CONNECTOR", AUTOSAR_NS):
-        # Provider port (P-Port)
-        provider_iref = connector.find("ns:PROVIDER-IREF", AUTOSAR_NS)
-        if provider_iref is not None:
-            provider_comp = provider_iref.find("ns:CONTEXT-COMPONENT-REF", AUTOSAR_NS)
-            provider_port = provider_iref.find("ns:TARGET-P-PORT-REF", AUTOSAR_NS)
-
-            if provider_comp is not None and provider_port is not None:
-                swc_name = provider_comp.text.split('/')[-1]
-                port_name = provider_port.text.split('/')[-1]
-
-                if swc_name in swcs:
-                    port_exists = any(p['name'] == port_name for p in swcs[swc_name]['ports'])
-                    if not port_exists:
-                        swcs[swc_name]['ports'].append({
-                            'name': port_name,
-                            'type': 'P-Port',
-                            'direction': 'provided'
-                        })
-
-        # Requester port (R-Port)
-        requester_iref = connector.find("ns:REQUESTER-IREF", AUTOSAR_NS)
-        if requester_iref is not None:
-            requester_comp = requester_iref.find("ns:CONTEXT-COMPONENT-REF", AUTOSAR_NS)
-            requester_port = requester_iref.find("ns:TARGET-R-PORT-REF", AUTOSAR_NS)
-
-            if requester_comp is not None and requester_port is not None:
-                swc_name = requester_comp.text.split('/')[-1]
-                port_name = requester_port.text.split('/')[-1]
-
-                if swc_name in swcs:
-                    port_exists = any(p['name'] == port_name for p in swcs[swc_name]['ports'])
-                    if not port_exists:
-                        swcs[swc_name]['ports'].append({
-                            'name': port_name,
-                            'type': 'R-Port',
-                            'direction': 'required'
-                        })
-
-
-def extract_connectors(root, swcs):
-    """Extracts connectors between SWCs"""
-    connectors = []
-    composition = root.find(".//ns:COMPOSITION-SW-COMPONENT-TYPE", AUTOSAR_NS)
-    if composition is None:
-        return connectors
-
-    for connector in composition.findall(".//ns:CONNECTORS/ns:ASSEMBLY-SW-CONNECTOR", AUTOSAR_NS):
         provider = connector.find("ns:PROVIDER-IREF", AUTOSAR_NS)
         requester = connector.find("ns:REQUESTER-IREF", AUTOSAR_NS)
 
@@ -111,7 +64,6 @@ def extract_connectors(root, swcs):
 
         provider_comp = provider.find("ns:CONTEXT-COMPONENT-REF", AUTOSAR_NS)
         provider_port = provider.find("ns:TARGET-P-PORT-REF", AUTOSAR_NS)
-
         requester_comp = requester.find("ns:CONTEXT-COMPONENT-REF", AUTOSAR_NS)
         requester_port = requester.find("ns:TARGET-R-PORT-REF", AUTOSAR_NS)
 
@@ -123,29 +75,35 @@ def extract_connectors(root, swcs):
         requester_swc = requester_comp.text.split('/')[-1]
         requester_port_name = requester_port.text.split('/')[-1]
 
-        connector_data = {
-            "source": f"{provider_swc}.{provider_port_name}",
-            "target": f"{requester_swc}.{requester_port_name}",
-            "direction": f"{provider_swc} -> {requester_swc}"
+        # Ajouter le port si absent
+        if provider_port_name not in swcs[provider_swc]["ports"]:
+            swcs[provider_swc]["ports"][provider_port_name] = {
+                "type": "P-Port",
+                "connections": []
+            }
+
+        if requester_port_name not in swcs[requester_swc]["ports"]:
+            swcs[requester_swc]["ports"][requester_port_name] = {
+                "type": "R-Port",
+                "connections": []
+            }
+
+        # Ajouter la connexion
+        connection = {
+            "target_swc": requester_swc,
+            "target_port": requester_port_name
         }
 
-        connectors.append(connector_data)
-
-        if provider_swc in swcs:
-            swcs[provider_swc]["connectors"].append(connector_data)
-        if requester_swc in swcs:
-            swcs[requester_swc]["connectors"].append(connector_data)
-
-    return connectors
+        swcs[provider_swc]["ports"][provider_port_name]["connections"].append(connection)
+        swcs[requester_swc]["ports"][requester_port_name]["connections"].append({
+            "source_swc": provider_swc,
+            "source_port": provider_port_name
+        })
 
 
 def extract_delegations(root, swcs):
-    """Extracts port delegations"""
-    composition = root.find(".//ns:COMPOSITION-SW-COMPONENT-TYPE", AUTOSAR_NS)
-    if composition is None:
-        return
-
-    for delegation in composition.findall(".//ns:CONNECTORS/ns:DELEGATION-SW-CONNECTOR", AUTOSAR_NS):
+    """Extrait les délégations de ports"""
+    for delegation in root.findall(".//ns:CONNECTORS/ns:DELEGATION-SW-CONNECTOR", AUTOSAR_NS):
         inner_port = delegation.find("ns:INNER-PORT-IREF", AUTOSAR_NS)
         outer_port = delegation.find("ns:OUTER-PORT-REF", AUTOSAR_NS)
 
@@ -168,96 +126,50 @@ def extract_delegations(root, swcs):
         outer_port_name = outer_port.text.split('/')[-1]
 
         if swc_name in swcs:
-            delegation_data = {
+            swcs[swc_name]["delegations"].append({
                 "inner_port": port_name,
                 "outer_port": outer_port_name,
                 "type": "P-Port" if p_port_ref is not None else "R-Port"
-            }
-            swcs[swc_name]["delegations"].append(delegation_data)
+            })
 
 
 def parse_arxml(file_content: bytes):
-    """Parses an ARXML file and extracts the SWC structure"""
+    """Analyse un fichier ARXML et extrait la structure SWC"""
     try:
         tree = etree.parse(BytesIO(file_content))
         root = tree.getroot()
 
-        # Extract SWCs from composition
+        # Extraction des SWCs
         swcs = extract_swcs(root)
 
-        result = {
-            "composition": {
-                "name": "",
-                "swcs": {},
-                "connections": []
-            }
-        }
-
-        composition_name = root.find(".//ns:COMPOSITION-SW-COMPONENT-TYPE/ns:SHORT-NAME", AUTOSAR_NS)
-        result["composition"]["name"] = composition_name.text if composition_name is not None else "UNKNOWN_COMPOSITION"
-
-        # Extract ports and connectors
-        extract_ports_from_connectors(root, swcs)
-        connections = extract_connectors(root, swcs)
-        result["composition"]["connections"] = connections
-
-        # Extract delegations
+        # Extraction des connexions et délégations
+        extract_connections(root, swcs)
         extract_delegations(root, swcs)
 
-        # Convert SWC structure
-        for swc_name, swc_data in swcs.items():
-            result["composition"]["swcs"][swc_name] = {
-                "type": swc_data["type"],
-                "ports": {},
-                "delegations": swc_data["delegations"]
+        # Génération du résultat
+        composition_name = root.find(".//ns:COMPOSITION-SW-COMPONENT-TYPE/ns:SHORT-NAME", AUTOSAR_NS)
+        result = {
+            "composition": {
+                "name": composition_name.text if composition_name is not None else "UNKNOWN_COMPOSITION",
+                "swcs": swcs
             }
-
-            # Organize ports
-            for port in swc_data["ports"]:
-                port_info = {
-                    "type": port["type"],
-                    "direction": port["direction"],
-                    "connections": []
-                }
-
-                result["composition"]["swcs"][swc_name]["ports"][port["name"]] = port_info
-
-        # Fill connections
-        for connector in result["composition"]["connections"]:
-            source_swc, source_port = connector["source"].split('.')
-            target_swc, target_port = connector["target"].split('.')
-
-            if source_swc in result["composition"]["swcs"] and source_port in result["composition"]["swcs"][source_swc]["ports"]:
-                result["composition"]["swcs"][source_swc]["ports"][source_port]["connections"].append(connector["target"])
-
-            if target_swc in result["composition"]["swcs"] and target_port in result["composition"]["swcs"][target_swc]["ports"]:
-                result["composition"]["swcs"][target_swc]["ports"][target_port]["connections"].append(connector["source"])
+        }
 
         return result
 
     except Exception as e:
-        logger.error(f"ARXML parsing error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"ARXML parsing error: {str(e)}")
+        logger.error(f"Erreur lors de l'analyse du fichier ARXML : {e}")
+        raise HTTPException(status_code=400, detail="Erreur lors de l'analyse du fichier")
 
 
 @app.post("/upload-arxml/")
 async def upload_arxml(file: UploadFile = File(...)):
-    """Endpoint to analyze an ARXML file"""
-    if not file.filename.endswith(".arxml"):
-        raise HTTPException(status_code=400, detail="Only .arxml files are allowed")
-
-    file_content = await file.read()
+    """Endpoint pour uploader et analyser un fichier ARXML"""
     try:
-        parsed_data = parse_arxml(file_content)
+        content = await file.read()
+        parsed_data = parse_arxml(content)
         return JSONResponse(content=parsed_data, status_code=200)
     except HTTPException as e:
-        raise e
+        return JSONResponse(content={"error": str(e.detail)}, status_code=e.status_code)
     except Exception as e:
-        logger.error(f"Server error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
